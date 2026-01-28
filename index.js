@@ -5,17 +5,29 @@ const fs = require("fs");
 const FormData = require("form-data");
 const session = require("express-session");
 const path = require("path");
+const crypto = require("crypto");
 
 const app = express();
-const upload = multer({ dest: "/tmp" });
+
+/* ================= CONFIG ================= */
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const BASE_URL = process.env.BASE_URL;
 
-// 🔐 LOGIN CREDS (change if you want)
 const ADMIN_USER = "admin";
 const ADMIN_PASS = "12345";
+
+/* ================= MULTER (NO SIZE LIMIT) ================= */
+
+const upload = multer({
+  dest: "/tmp",
+  limits: {
+    fileSize: Infinity
+  }
+});
+
+/* ================= MIDDLEWARE ================= */
 
 app.use(express.urlencoded({ extended: true }));
 app.use(
@@ -26,53 +38,39 @@ app.use(
   })
 );
 
+/* ================= AUTH ================= */
+
+function auth(req, res, next) {
+  if (!req.session.user) return res.redirect("/login");
+  next();
+}
+
 /* ================= LOGIN ================= */
 
 app.get("/login", (req, res) => {
   res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<title>Login</title>
-<style>
-body{background:#0f172a;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh}
-.card{background:#020617;padding:30px;border-radius:12px;width:300px}
-input,button{width:100%;padding:10px;margin-top:10px;border-radius:6px;border:none}
-button{background:#2563eb;color:#fff;font-weight:bold}
-</style>
-</head>
-<body>
-<div class="card">
-<h2>Admin Login</h2>
-<form method="POST" action="/login">
-<input name="username" placeholder="Username" required />
-<input name="password" type="password" placeholder="Password" required />
-<button>Login</button>
-</form>
-</div>
-</body>
-</html>
-`);
+  <form method="POST">
+    <input name="username" placeholder="Username" />
+    <input type="password" name="password" placeholder="Password" />
+    <button>Login</button>
+  </form>
+  `);
 });
 
 app.post("/login", (req, res) => {
-  const { username, password } = req.body;
-  if (username === ADMIN_USER && password === ADMIN_PASS) {
+  if (
+    req.body.username === ADMIN_USER &&
+    req.body.password === ADMIN_PASS
+  ) {
     req.session.user = true;
     return res.redirect("/");
   }
-  res.send("❌ Invalid Login");
+  res.send("Invalid Login");
 });
 
 app.get("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/login"));
 });
-
-/* ============== AUTH MIDDLEWARE ============== */
-function auth(req, res, next) {
-  if (!req.session.user) return res.redirect("/login");
-  next();
-}
 
 /* ================= UI ================= */
 
@@ -80,108 +78,131 @@ app.get("/", auth, (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
-<head>
-<title>Telegram Storage</title>
-<style>
-body{background:#020617;color:#e5e7eb;font-family:sans-serif}
-.container{max-width:400px;margin:80px auto;background:#020617;padding:25px;border-radius:14px;box-shadow:0 0 20px #000}
-button{background:#22c55e;border:none;padding:10px;width:100%;color:#000;font-weight:bold;border-radius:8px}
-input{width:100%;margin:10px 0}
-a{color:#38bdf8;word-break:break-all}
-.progress{height:6px;background:#1e293b;border-radius:10px;overflow:hidden;margin-top:10px}
-.bar{height:6px;width:0;background:#22c55e}
-</style>
-</head>
-<body>
-<div class="container">
+<body style="background:#020617;color:#fff;font-family:sans-serif">
 <h2>Telegram Storage</h2>
-<form id="form">
+<form id="f">
 <input type="file" name="file" required />
 <button>Upload</button>
 </form>
-<div class="progress"><div class="bar" id="bar"></div></div>
-<div id="result"></div>
-<br><a href="/logout">Logout</a>
-</div>
-
+<pre id="r"></pre>
 <script>
-const form=document.getElementById("form");
-form.onsubmit=e=>{
+f.onsubmit=e=>{
 e.preventDefault();
-const data=new FormData(form);
-const xhr=new XMLHttpRequest();
-xhr.open("POST","/upload");
-xhr.upload.onprogress=e=>{
-document.getElementById("bar").style.width=(e.loaded/e.total*100)+"%";
-};
-xhr.onload=()=>{document.getElementById("result").innerHTML=xhr.responseText;}
-xhr.send(data);
-};
+const d=new FormData(f);
+fetch("/upload",{method:"POST",body:d})
+.then(r=>r.text()).then(t=>r.innerHTML=t);
+}
 </script>
+<a href="/logout">Logout</a>
 </body>
 </html>
 `);
 });
 
+/* ================= CHUNK UPLOAD ================= */
+
+const CHUNK_SIZE = 20 * 1024 * 1024; // 20MB
+
+async function sendChunk(filePath, name) {
+  const form = new FormData();
+  form.append("chat_id", CHANNEL_ID);
+  form.append("document", fs.createReadStream(filePath), name);
+
+  const res = await axios.post(
+    `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`,
+    form,
+    { headers: form.getHeaders() }
+  );
+
+  return res.data.result.document.file_id;
+}
+
 /* ================= UPLOAD ================= */
 
 app.post("/upload", auth, upload.single("file"), async (req, res) => {
   try {
+    const filePath = req.file.path;
     const originalName = req.file.originalname;
+    const size = fs.statSync(filePath).size;
 
-    const form = new FormData();
-    form.append("chat_id", CHANNEL_ID);
-    form.append("document", fs.createReadStream(req.file.path), originalName);
+    const chunks = [];
+    const fd = fs.openSync(filePath, "r");
 
-    const tg = await axios.post(
-      `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`,
-      form,
-      { headers: form.getHeaders() }
-    );
+    let offset = 0;
+    let index = 0;
 
-    fs.unlinkSync(req.file.path);
+    while (offset < size) {
+      const partPath = `/tmp/${crypto.randomUUID()}.part`;
+      const buffer = Buffer.alloc(Math.min(CHUNK_SIZE, size - offset));
+      fs.readSync(fd, buffer, 0, buffer.length, offset);
+      fs.writeFileSync(partPath, buffer);
 
-    const fileId = tg.data.result.document.file_id;
-    const fileName = tg.data.result.document.file_name;
+      const fileId = await sendChunk(
+        partPath,
+        `${originalName}.part${index}`
+      );
 
-    const link = `${BASE_URL}/download/${fileId}?name=${encodeURIComponent(fileName)}`;
+      chunks.push(fileId);
+      fs.unlinkSync(partPath);
 
-    res.send(`
-      <p>✅ Upload Success</p>
-      <a href="${link}" target="_blank">${link}</a>
-      <br><button onclick="navigator.clipboard.writeText('${link}')">Copy Link</button>
-    `);
+      offset += buffer.length;
+      index++;
+    }
+
+    fs.closeSync(fd);
+    fs.unlinkSync(filePath);
+
+    const token = crypto.randomUUID();
+    fs.writeFileSync(`/tmp/${token}.json`, JSON.stringify({
+      name: originalName,
+      parts: chunks
+    }));
+
+    const link = `${BASE_URL}/download/${token}`;
+
+    res.send(`✅ Uploaded<br><a href="${link}">${link}</a>`);
 
   } catch (e) {
+    console.error(e);
     res.send("❌ Upload Failed");
   }
 });
 
 /* ================= DOWNLOAD ================= */
 
-app.get("/download/:fileId", async (req, res) => {
+app.get("/download/:id", async (req, res) => {
   try {
-    const fileId = req.params.fileId;
-    const fileName = req.query.name || "file";
-
-    const tg = await axios.get(
-      `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`
+    const meta = JSON.parse(
+      fs.readFileSync(`/tmp/${req.params.id}.json`)
     );
 
-    const tgUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${tg.data.result.file_path}`;
-    const temp = `/tmp/${fileName}`;
+    const finalPath = `/tmp/${meta.name}`;
+    const w = fs.createWriteStream(finalPath);
 
-    const r = await axios({ url: tgUrl, responseType: "stream" });
-    const w = fs.createWriteStream(temp);
-    r.data.pipe(w);
+    for (const fileId of meta.parts) {
+      const g = await axios.get(
+        `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`
+      );
 
-    w.on("finish", () => {
-      res.download(temp, fileName, () => fs.unlinkSync(temp));
+      const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${g.data.result.file_path}`;
+      const r = await axios({ url, responseType: "stream" });
+
+      await new Promise(ok => {
+        r.data.pipe(w, { end: false });
+        r.data.on("end", ok);
+      });
+    }
+
+    w.end(() => {
+      res.download(finalPath, meta.name, () => fs.unlinkSync(finalPath));
     });
 
-  } catch {
+  } catch (e) {
+    console.error(e);
     res.send("❌ Download Failed");
   }
 });
 
-app.listen(5000, () => console.log("Server running"));
+/* ================= START ================= */
+
+app.listen(5000, () => console.log("🚀 Server running"));
