@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  telegram-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram_local_server
+    environment:
+      TELEGRAM_API_ID: "39798679"
+      TELEGRAM_API_HASH: "1df5ed2c86a2e14ae72bcbf727111e15"
+      TELEGRAM_LOCAL: "1"
+      TELEGRAM_STAT: "1"
+    ports:
+      - "8082:8081"
+    volumes:
+      - telegram-data:/var/lib/telegram-bot-api
+    networks:
+      - coolify
+
+volumes:
+  telegram-data:
+
+networks:
+  coolify:
+    external: true
